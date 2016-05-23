@@ -1,4 +1,6 @@
 import Control.Monad
+import Control.Concurrent.MVar
+import Control.Concurrent
 import Data.Maybe
 import System.IO
 import qualified Data.Map.Strict as M
@@ -16,19 +18,20 @@ initialGame = Game {world = 0, state = InWorld}
 main :: IO ()
 main = do
   hSetEcho stdin False
-  gameLoop initialGame userInputAction
-  where userInputAction :: IO(String)
-        userInputAction = getLine
+  buffer <- newEmptyMVar
+  forkIO $ gameLoop initialGame (maybe "" id <$> tryTakeMVar buffer)
+  -- forkIO $ readMVar buffer >>= putStrLn . ("user input: " ++)
+  forever $ putMVar buffer =<< getLine --readMVar buffer >>= putStrLn . ("user input: " ++)
 
 gameLoop :: Game -> IO (String) -> IO()
 gameLoop game@(Game {world = _, state = Exit}) _ = return ()
 gameLoop game userInput = do  
   updateGameUI game
-  events <- getEvents game userInput; putStrLn . ("Number of events: " ++) . show . length $ events;
+  events <- getEvents game userInput
   let game' = updateGame game events 
     in case state game' of 
-      InWorld -> gameLoop game' userInput
-      Exit    -> return ()
+      InWorld -> do gameLoop game' userInput
+      Exit    -> myThreadId >>= killThread
 
 updateGame :: Game -> [Event] -> Game
 updateGame game [] = game
@@ -37,7 +40,9 @@ updateGame game (WorldEvent e:es) = updateGame (game {world = e . world $ game})
 updateGame game (StateEvent e:es) = updateGame (game {state = e . state $ game}) es
 
 getEvents :: Game -> IO (String) -> IO ([Event])
-getEvents (Game {world = w, state = s}) userInputAction = map (maybe (StateEvent (const Exit)) id) . filter isJust . (++getWorldEvents w) <$> getUserEvents 
+getEvents (Game {world = w, state = s}) userInputAction = do 
+  threadDelay 500000
+  map (maybe (StateEvent (const Exit)) id) . filter isJust . (++getWorldEvents w) <$> getUserEvents 
   where
     getWorldEvents :: World -> [Maybe Event]
     getWorldEvents val = [if val < 5 then Just . WorldEvent $ (+1) else Nothing] 
@@ -48,7 +53,7 @@ getEvents (Game {world = w, state = s}) userInputAction = map (maybe (StateEvent
     keyBindings :: State -> M.Map UserInput Event
     keyBindings Exit = M.fromList []
     keyBindings InWorld = M.fromList 
-        [   ('\n',WorldEvent (+1)) , 
+        [   ('a',WorldEvent (+1)) , 
             ('r', WorldEvent (const 0)), 
             ('q', StateEvent (const Exit))]
 

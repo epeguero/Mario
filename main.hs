@@ -1,5 +1,7 @@
 import Control.Monad
 import Control.Concurrent.MVar
+import Control.Concurrent.STM
+import Control.Concurrent.STM.TQueue
 import Control.Concurrent
 import Data.Maybe
 import System.IO
@@ -9,7 +11,7 @@ type World = Int
 data State = InWorld | Exit deriving (Show)
 data Game = Game {world :: World, state :: State} deriving (Show)
 data Event = WorldEvent (World -> World) | StateEvent (State -> State)
-
+type Epoch = [Event]
 type UserInput = Char
 
 initialGame :: Game
@@ -17,49 +19,75 @@ initialGame = Game {world = 0, state = InWorld}
 
 main :: IO ()
 main = do
-  hSetEcho stdin False
-  buffer <- newEmptyMVar
-  forkIO $ gameLoop initialGame (maybe "" id <$> tryTakeMVar buffer)
-  -- forkIO $ readMVar buffer >>= putStrLn . ("user input: " ++)
-  forever $ putMVar buffer =<< getLine --readMVar buffer >>= putStrLn . ("user input: " ++)
+    hSetEcho stdin False
+    hSetBuffering stdin NoBuffering
+    epochQueue    <- atomically newTQueue
+    gameMVar      <- newMVar initialGame
+    let   
+        progressGame :: IO ()
+        progressGame = do
+            game    <- readGame
+            updateGameUI game
+            game'   <- foldl applyEvent game <$> readEpoch
+            writeGame game'
+            progressGame
+            
+        generateWorldEpoch :: IO ()
+        generateWorldEpoch = do 
+            game    <- readGame 
+            writeEpoch $ gameWorldEpoch game
+            threadDelay 250000
+            generateWorldEpoch
 
-gameLoop :: Game -> IO (String) -> IO()
-gameLoop game@(Game {world = _, state = Exit}) _ = return ()
-gameLoop game userInput = do  
-  updateGameUI game
-  events <- getEvents game userInput
-  let game' = updateGame game events 
-    in case state game' of 
-      InWorld -> do gameLoop game' userInput
-      Exit    -> myThreadId >>= killThread
+        generateUserEpoch :: IO ()
+        generateUserEpoch = do 
+            game        <- readGame
+            input       <- readInput
+            case M.lookup input $ keyBindings game of
+                Nothing     -> return ()
+                Just event  -> writeEpoch [event]
+            generateUserEpoch 
+            
+        updateGameUI :: Game -> IO()
+        updateGameUI = print . world
 
-updateGame :: Game -> [Event] -> Game
-updateGame game [] = game
-updateGame game@(Game {world = _, state = Exit}) _ = game
-updateGame game (WorldEvent e:es) = updateGame (game {world = e . world $ game}) es
-updateGame game (StateEvent e:es) = updateGame (game {state = e . state $ game}) es
+        readInput :: IO (UserInput)
+        readInput = getChar
 
-getEvents :: Game -> IO (String) -> IO ([Event])
-getEvents (Game {world = w, state = s}) userInputAction = do 
-  threadDelay 500000
-  map (maybe (StateEvent (const Exit)) id) . filter isJust . (++getWorldEvents w) <$> getUserEvents 
-  where
-    getWorldEvents :: World -> [Maybe Event]
-    getWorldEvents val = [if val < 5 then Just . WorldEvent $ (+1) else Nothing] 
+        readGame :: IO (Game)
+        readGame = readMVar gameMVar
 
-    getUserEvents :: IO [Maybe Event]
-    getUserEvents = map (flip M.lookup (keyBindings s)) <$> userInputAction
-    
-    keyBindings :: State -> M.Map UserInput Event
-    keyBindings Exit = M.fromList []
-    keyBindings InWorld = M.fromList 
-        [   ('a',WorldEvent (+1)) , 
-            ('r', WorldEvent (const 0)), 
-            ('q', StateEvent (const Exit))]
+        writeGame :: Game -> IO ()
+        writeGame game = swapMVar gameMVar game >> return ()
 
+        readEpoch :: IO (Epoch)
+        readEpoch = atomically $ readTQueue epochQueue
 
-updateGameUI :: Game -> IO()
-updateGameUI = print . world
+        writeEpoch :: Epoch -> IO ()
+        writeEpoch []       = return ()
+        writeEpoch epoch    = atomically $ writeTQueue epochQueue epoch
+
+        in do
+            forkIO  $ progressGame
+            forkIO  $ generateWorldEpoch
+            forever $ generateUserEpoch
+
+keyBindings :: Game -> M.Map UserInput Event
+keyBindings (Game {state = Exit}) = M.fromList []
+keyBindings (Game {state = InWorld}) = M.fromList 
+            [   ('a',WorldEvent (+1)) , 
+                ('r', WorldEvent (const 0)), 
+                ('q', StateEvent (const Exit))]
+
+gameWorldEpoch :: Game -> Epoch
+gameWorldEpoch game = 
+    foldl (\accu (pred,e) -> if pred game then e:accu else accu) [] 
+    [((< 20) . world, WorldEvent $ (subtract 1))]
+
+applyEvent :: Game -> Event -> Game
+applyEvent game@(Game {world = _, state = Exit}) _ = game
+applyEvent game (WorldEvent e) = game {world = e . world $ game}
+applyEvent game (StateEvent e) = game {state = e . state $ game} 
 
 
 

@@ -6,7 +6,7 @@ import Data.Maybe
 type World = Int
 data State = InWorld | Exit deriving (Show)
 data Game = Game {world :: World, state :: State} deriving (Show)
-data Event = Event {action :: Game -> UserInput -> Game, eventName :: String}
+data Event = Event {action :: Game -> Game, eventName :: String}
 data EventSource = EventSource {events :: Game -> UserInput -> [Event], eventSourceName :: String, delay :: Int}
 type UserInput = String
 
@@ -19,7 +19,7 @@ eventSources :: [EventSource]
 eventSources = [gameEventSource, userEventSource]
 
 testEventSource = EventSource { events = const $ const [testEvent], eventSourceName = "testSource", delay = 1000000} 
-testEvent = Event {action = const $ const Game {world = 42, state = InWorld}, eventName = "test"}
+testEvent = Event {action = const Game {world = 42, state = InWorld}, eventName = "test"}
 
 gameEventSource :: EventSource
 gameEventSource = EventSource { 
@@ -27,7 +27,7 @@ gameEventSource = EventSource {
         if world game < 20 
             then [
                 Event { 
-                    action = \game -> \userInput -> game {world = world game - 1}, 
+                    action = \g -> g {world = world g - 1}, 
                     eventName = "World Event"
                 }
             ]
@@ -43,7 +43,7 @@ userEventSource = EventSource {
             then []
             else [
                 Event {
-                    action = parseUserInput,
+                    action = \g -> parseUserInput g userInput,
                     eventName = "User Event"
                 }
             ],

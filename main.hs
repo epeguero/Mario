@@ -16,11 +16,12 @@ main :: IO ()
 main = do
     hSetEcho stdin False
     hSetBuffering stdin NoBuffering
-    gameMVar            <- newMVar initialGame
-    inputBuffer         <- newMVar []
-    eventQueue          <- newMVar [] 
-    eventSourceSem      <- newQSemN numEventSources
-    turnLock            <- newMVar ()
+    gameMVar                <- newMVar initialGame
+    inputBuffer             <- newMVar []
+    eventQueue              <- newMVar [] 
+    eventSourceSem          <- newQSemN numEventSources
+    turnLock                <- newMVar ()
+    bufferedEventSources    <- zip eventSources <$> makeBuffers numEventSources
     let 
         executeGameTurn :: IO ()
         executeGameTurn = do
@@ -29,32 +30,31 @@ main = do
             waitForEventSourcesToFinish
             game        <- takeMVar gameMVar
             newEvents   <- swapMVar eventQueue []
-            userInput   <- swapMVar inputBuffer []
-            game'       <- return $ applyEvents game userInput newEvents 
+            game'       <- return $ applyEvents game newEvents 
             putMVar gameMVar game'
             if null newEvents
                 then return ()
                 else updateGameUI game' >> putStrLn ("Events applied: " ++ show (length newEvents)) 
             putMVar turnLock () -- Mark start of the next turn
             
-        generateEvents :: EventSource -> IO ()
-        generateEvents eventSource = do
+        generateEvents :: (EventSource, MVar UserInput) -> IO ()
+        generateEvents (eventSource, inputBuffer) = do
             threadDelay $ delay eventSource
             readMVar turnLock
             waitQSemN eventSourceSem 1  -- Start event
             es <- takeMVar eventQueue
-            putMVar eventQueue . (es++) =<< events eventSource <$> readMVar gameMVar <*> readMVar inputBuffer 
+            putMVar eventQueue . (es++) =<< events eventSource <$> readMVar gameMVar <*> swapMVar inputBuffer []
             signalQSemN eventSourceSem 1  -- End event
 
         listenForUserInput :: IO ()
         listenForUserInput = do
             readMVar turnLock
             input <- readUserInput
-            putMVar inputBuffer . (++input) =<< takeMVar inputBuffer
+            mapM_ (\(_,buff) -> takeMVar buff >>= putMVar buff . (++input)) bufferedEventSources
 
-        applyEvents :: Game -> UserInput -> [Event] -> Game
-        applyEvents game _ []           = game
-        applyEvents game input (e:es)   = applyEvents (action e game input) input es
+        applyEvents :: Game -> [Event] -> Game
+        applyEvents game []     = game
+        applyEvents game (e:es) = applyEvents (action e game) es
 
         waitForEventSourcesToFinish :: IO ()
         waitForEventSourcesToFinish = do 
@@ -63,9 +63,14 @@ main = do
 
         in do
             updateGameUI initialGame 
-            mapM_ (forkIO . forever . generateEvents) eventSources 
+            mapM_ (forkIO . forever . generateEvents) bufferedEventSources
             forkIO . forever $ executeGameTurn
             forever listenForUserInput
+
+makeBuffers :: Int -> IO [MVar [a]]
+makeBuffers n
+    | n <= 0    = return []
+    | otherwise = (liftM2 (:)) (newMVar []) (makeBuffers (n-1))
 
 numEventSources :: Int
 numEventSources = length eventSources

@@ -2,10 +2,13 @@ module Main(main) where
 
 import Game
 
+import qualified Data.Map.Strict as M
+import Data.Maybe
 import Control.Monad
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Concurrent.STM.TQueue
+import Control.Concurrent.QSemN
 import Control.Concurrent
 import System.IO
 
@@ -13,52 +16,58 @@ main :: IO ()
 main = do
     hSetEcho stdin False
     hSetBuffering stdin NoBuffering
-    epochQueue    <- atomically newTQueue
-    gameMVar      <- newMVar initialGame
-    let   
-        progressGame :: IO ()
-        progressGame = do
-            game    <- readGame
-            updateGameUI game
-            game'   <- foldl applyEvent game <$> readEpoch
-            writeGame game'
-            progressGame
+    gameMVar            <- newMVar initialGame
+    inputBuffer         <- newMVar []
+    eventQueue          <- newMVar [] 
+    eventSourceSem      <- newQSemN numEventSources
+    turnLock            <- newMVar ()
+    let 
+        executeGameTurn :: IO ()
+        executeGameTurn = do
+            threadDelay 1000
+            takeMVar turnLock   -- Mark end of the current turn
+            waitForEventSourcesToFinish
+            game        <- takeMVar gameMVar
+            newEvents   <- swapMVar eventQueue []
+            userInput   <- swapMVar inputBuffer []
+            game'       <- return $ applyEvents game userInput newEvents 
+            putMVar gameMVar game'
+            if null newEvents
+                then return ()
+                else updateGameUI game' >> putStrLn ("Events applied: " ++ show (length newEvents)) 
+            putMVar turnLock () -- Mark start of the next turn
             
-        generateWorldEpoch :: IO ()
-        generateWorldEpoch = do 
-            game    <- readGame 
-            writeEpoch $ gameWorldEpoch game
-            threadDelay 250000
-            generateWorldEpoch
+        generateEvents :: EventSource -> IO ()
+        generateEvents eventSource = do
+            threadDelay $ delay eventSource
+            readMVar turnLock
+            waitQSemN eventSourceSem 1  -- Start event
+            es <- takeMVar eventQueue
+            putMVar eventQueue . (es++) =<< events eventSource <$> readMVar gameMVar <*> readMVar inputBuffer 
+            signalQSemN eventSourceSem 1  -- End event
 
-        generateUserEpoch :: IO ()
-        generateUserEpoch = do 
-            game        <- readGame
-            input       <- readUserInput
-            writeEpoch $ userEpoch game input
-            generateUserEpoch
+        listenForUserInput :: IO ()
+        listenForUserInput = do
+            readMVar turnLock
+            input <- readUserInput
+            putMVar inputBuffer . (++input) =<< takeMVar inputBuffer
 
-        readUserInput :: IO (UserInput)
-        readUserInput = getChar
+        applyEvents :: Game -> UserInput -> [Event] -> Game
+        applyEvents game _ []           = game
+        applyEvents game input (e:es)   = applyEvents (action e game input) input es
 
-        readGame :: IO (Game)
-        readGame = readMVar gameMVar
-
-        writeGame :: Game -> IO ()
-        writeGame game = swapMVar gameMVar game >> return ()
-
-        readEpoch :: IO (Epoch)
-        readEpoch = atomically $ readTQueue epochQueue
-
-        writeEpoch :: Epoch -> IO ()
-        writeEpoch []       = return ()
-        writeEpoch epoch    = atomically $ writeTQueue epochQueue epoch
+        waitForEventSourcesToFinish :: IO ()
+        waitForEventSourcesToFinish = do 
+            waitQSemN eventSourceSem numEventSources -- Wait for all event sources to finish
+            signalQSemN eventSourceSem numEventSources -- Allow event sources to continue
 
         in do
-            forkIO  $ progressGame
-            forkIO  $ generateWorldEpoch
-            forever $ generateUserEpoch
+            updateGameUI initialGame 
+            mapM_ (forkIO . forever . generateEvents) eventSources 
+            forkIO . forever $ executeGameTurn
+            forever listenForUserInput
 
-
+numEventSources :: Int
+numEventSources = length eventSources
 
 
